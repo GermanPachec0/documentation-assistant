@@ -16,11 +16,37 @@ import threading
 import time
 from collections import deque
 
+from pathlib import Path
+
 import streamlit as st
 
-import llm
-from generation import responder
-from ingest import MODELO as MODELO_EMBEDDINGS
+# Las rutas del proyecto ("data/chroma", "data/chunks"…) son relativas a la raíz
+# del repo. Así funcionan sin importar desde qué carpeta se lance la app
+# (en Streamlit Community Cloud no lo elegimos nosotros).
+os.chdir(Path(__file__).resolve().parent.parent)
+
+import llm  # noqa: E402  (después del chdir, a propósito)
+from generation import responder  # noqa: E402
+from ingest import MODELO as MODELO_EMBEDDINGS  # noqa: E402
+from ingest import abrir_coleccion  # noqa: E402
+
+
+@st.cache_resource(show_spinner="Preparando la documentación (solo la primera vez, unos 2 minutos)…")
+def asegurar_indice() -> int:
+    """Si el índice no existe (servidor recién creado), lo arma desde cero.
+
+    En Docker esto pasa al construir la imagen; en Streamlit Community Cloud no
+    hay paso de construcción, así que lo hace la app en su primer arranque.
+    cache_resource: corre una sola vez por proceso, no en cada clic.
+    """
+    if abrir_coleccion().count() == 0:
+        import preparar
+
+        preparar.main()
+    return abrir_coleccion().count()
+
+
+asegurar_indice()
 
 # --- Configuración -----------------------------------------------------------
 
