@@ -1,0 +1,18 @@
+# Glosario de negocio: cómo llaman los usuarios a cada endpoint.
+#
+# El PDF usa su propio vocabulario ("Recibo de Cobro", "egreso monetario") y
+# los usuarios usan otro ("acreditar dinero"). Ningún modelo puede adivinar
+# esa equivalencia: hay que escribirla. La ingesta agrega estos términos a la
+# segunda línea del fragmento, así quedan en el encabezado y en cada hijo.
+#
+# Reglas:
+# - Escribilo pensando en cómo habla la gente, NO mirando eval/preguntas.yaml.
+#   Si copiás las palabras de las preguntas, la evaluación queda arreglada a mano.
+# - La clave es el id del PADRE (data/chunks/esco.json). Un id que no existe
+#   frena la ingesta, así un typo acá no se pierde en silencio.
+
+esco:post:insert-recibo-cobro:
+  - acreditar dinero en una cuenta
+
+esco:post:insert-comprobante-pago:
+  - debitar dinero de una cuenta

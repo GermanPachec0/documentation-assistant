@@ -1,0 +1,218 @@
+# Preguntas de evaluación del asistente.
+#
+# Reglas para escribirlas:
+# - Que suenen como las haría un usuario real de ESCO, con SUS palabras,
+#   no con las del PDF. Si copiás frases del documento, la evaluación da
+#   mejor de lo que es.
+# - `esperados` son ids de PADRE (sin "#n"): el fragmento que tiene la
+#   respuesta. Los ids están en data/chunks/esco.json.
+# - Si la respuesta no está en el documento, `esperados: []` y
+#   `sin_respuesta: true`: el asistente tiene que decir que no sabe.
+#
+# Campos:
+#   id            identificador corto y estable (p01, p02…)
+#   pregunta      tal cual la escribiría el usuario
+#   esperados     ids de padre que la responden (uno o más)
+#   categoria     qué pone a prueba (ver lista abajo)
+#   sin_respuesta true si el documento no la responde (opcional)
+#   notas         por qué es difícil, qué decidiste (opcional)
+#
+# Categorías sugeridas (tratá de cubrirlas todas):
+#   accion        el verbo importa: actualizar vs. borrar vs. consultar
+#   sinonimo      palabras distintas a las del PDF ("cliente" por "comitente")
+#   tecnica       el usuario nombra el endpoint o un campo
+#   nota          la respuesta está en una nota de negocio, no en un endpoint
+#   gigante       la respuesta está en un fragmento partido (ej. insert-cuenta-comitente)
+#   sin_respuesta el PDF no lo dice: el asistente no tiene que inventar
+#   ingles        la pregunta en inglés
+#   typos         errores de ortografía, sin tildes ni signos
+#   ambigua       más de un endpoint podría responderla
+
+preguntas:
+  - id: p01
+    pregunta: "¿Cómo actualizo el domicilio de una persona?"
+    esperados:
+      - esco:put:domicilio-cuenta-comitente
+    categoria: accion
+    notas: >
+      Caso que encontramos en el Paso 4: la búsqueda trae primero el DELETE
+      y el PUT queda 9.º. Ojo: el PDF no tiene un endpoint para el domicilio
+      de una PERSONA (PATCH persona no menciona domicilio); el domicilio
+      se actualiza a nivel cuenta comitente. Decidido: el esperado es el PUT
+      (en la práctica, "persona" y "comitente" se usan como lo mismo).
+
+  - id: p02
+    pregunta: "¿Cómo edito una persona natural?"
+    esperados:
+      - esco:patch:persona
+    categoria: accion
+    notas: >
+      "Editar" (usuario) vs. "Actualiza campos seleccionados de una persona"
+      (PDF); "natural" vs. "Física". Competidores: get-persona (consulta),
+      insert-persona (alta). También existe persona-hist ("Actualiza datos
+      de la persona", sin más documentación). Decidido: no cuenta como
+      acierto; el endpoint documentado para editar es PATCH persona.
+
+  - id: p03
+    pregunta: "¿Cómo creo una persona natural?"
+    esperados:
+      - esco:post:insert-persona
+    categoria: sinonimo
+    notas: >
+      El PDF dice "Física", no "natural": se indica con tpPersona = true.
+      También se puede crear dentro de insert-cuenta-comitente (TpPersona /
+      EsFisico), si la persona viene con una cuenta nueva.
+
+  - id: p04
+    pregunta: "¿Cómo creo una empresa / persona jurídica?"
+    esperados:
+      - esco:post:insert-persona
+    categoria: sinonimo
+    notas: >
+      Mismo endpoint que p03 con tpPersona = false ("False si es Jurídica").
+      Trampa: cuenta-juridica-comitente tiene "jurídica" en el nombre, pero
+      es un PATCH que solo modifica la Actividad de cuentas jurídicas: no
+      crea nada. Si la búsqueda lo trae primero, es otro caso de "acción".
+      La cuenta de la empresa se crea con insert-cuenta-comitente
+      (EsFisico = false).
+
+  - id: p08
+    pregunta: "¿Cómo creo una cuenta comitente con el flujo completo?"
+    esperados:
+      - esco:post:insert-cuenta-comitente
+    categoria: gigante
+    notas: >
+      La respuesta principal es insert-cuenta-comitente (págs. 25-39, partido
+      en 20 hijos): crea la cuenta, las personas y las tablas vinculadas en
+      una sola llamada. "Flujo completo" puede incluir además:
+      insert-cuenta-bancaria-comitente (cuenta bancaria),
+      insert-condominio (agregar condóminos a una cuenta existente) y los
+      get-tipos-* que dan los códigos válidos. Alternativa:
+      insert-solicitud-alta-cuenta-comitente, que crea una SOLICITUD que el
+      Back Office tiene que aprobar. El PDF no describe un "flujo" explícito:
+      el asistente tiene que armarlo. Decidido: el esperado para la búsqueda
+      es solo insert-cuenta-comitente; los demás se evalúan en la respuesta
+      del LLM (Paso 8), no en la recuperación.
+
+  - id: p09
+    pregunta: "¿Cómo puedo borrar una cuenta comitente?"
+    esperados: []
+    categoria: sin_respuesta
+    sin_respuesta: true
+    notas: >
+      El PDF no tiene un endpoint para borrar ni dar de baja una cuenta. Los
+      únicos DELETE son domicilio-cuenta-comitente y delete-condominio, y
+      get-cuentas-bloqueadas solo CONSULTA cuentas anuladas. Trampa: la
+      búsqueda probablemente traiga el DELETE de domicilio; el asistente
+      tiene que decir que no hay forma documentada, no ofrecer ese DELETE.
+
+  - id: p11
+    pregunta: "¿Cómo puedo obtener las operaciones de un cliente?"
+    esperados:
+      - esco:post:get-boletos
+      - esco:post:get-ordenes
+    categoria: ambigua
+    notas: >
+      "Operaciones" puede ser: boletos (operaciones concertadas, get-boletos),
+      órdenes (get-ordenes) o movimientos de cuenta corriente
+      (get-ctacorriente-consolidada / -monetaria / -intrumentos). Decidido:
+      cuenta como acierto boletos u órdenes. Trampa:
+      get-operaciones-burs tiene "operaciones" en el nombre pero devuelve
+      los TIPOS de operación bursátil, no las de un cliente.
+
+  - id: p12
+    pregunta: "¿Cómo puedo quitarle saldo a una cuenta comitente?"
+    esperados:
+      - esco:post:insert-comprobante-pago
+      - esco:post:insert-movimiento-manual
+    categoria: accion
+    notas: >
+      Par con p13: mismas palabras, acción opuesta (como "actualizar" vs.
+      "no actualizar" en el ejercicio de similitud). Comprobante de Pago =
+      "egreso monetario en la cuenta corriente", sin aprobación posterior.
+      Movimiento manual con débito (false) también resta. Trampa: si la
+      búsqueda trae insert-recibo-cobro (el que SUMA), es el mismo error
+      que el DELETE de domicilio. insert-soliictud-comprobante-pago NO
+      impacta la cuenta corriente: es una solicitud.
+
+  - id: p13
+    pregunta: "¿Cómo puedo agregarle saldo a una cuenta comitente?"
+    esperados:
+      - esco:post:insert-recibo-cobro
+      - esco:post:insert-movimiento-manual
+    categoria: sinonimo
+    notas: >
+      El usuario dice "saldo"; el PDF dice "Recibo de Cobro… genera un
+      ingreso monetario en la cuenta corriente de un cliente". Ninguna
+      palabra en común salvo "cuenta". Movimiento manual con crédito (true)
+      también suma. insert-soliictud-recibo-cobro NO impacta la cuenta
+      corriente: requiere aprobación.
+
+  - id: p15
+    pregunta: "Dame la receta del pan casero"
+    esperados: []
+    categoria: sin_respuesta
+    sin_respuesta: true
+    notas: >
+      Control fuera de tema (como "receta de empanadas" en el ejercicio de
+      similitud, que daba −0.04 en MiniLM y 0.79 en e5). Distinto de p09:
+      p09 es del dominio pero sin respuesta; esta no tiene nada que ver.
+      La búsqueda SIEMPRE devuelve 5 resultados aunque ninguno sirva: el
+      asistente tiene que darse cuenta y no responder con un endpoint.
+
+  - id: p16
+    pregunta: "¿Qué devuelve get-tipos-contrib-retencion?"
+    esperados:
+      - esco:get:get-tipos-contrib-retencion
+    categoria: tecnica
+    notas: >
+      Es uno de los dos endpoints DUPLICADOS del PDF (págs. 203 y 215, que se
+      contradicen). Nos quedamos con la 203: Codigo es string ("EX", "EJ",
+      "IN", "NI"). Si el asistente dice que Codigo es long, está usando la
+      versión descartada o inventando. Verifica también la decisión de
+      DESCARTAR.
+
+  - id: p17
+    pregunta: "What is the way to get a comittent account?"
+    esperados:
+      - esco:get:get-detalle-cuenta
+      - esco:post:searchaccount
+      - esco:get:get-cuentas-por-cuit
+    categoria: ingles
+    notas: >
+      Inglés + typo ("comittent", tal cual lo escribió el usuario). En
+      inglés "get an account" también puede querer decir "abrir una cuenta"
+      (insert-cuenta-comitente). Si para vos la intención es consultar,
+      quedan estos tres; si es crear, cambiá el esperado.
+
+  - id: p18
+    pregunta: "¿Qué FCI puedo usar para operar?"
+    esperados:
+      - esco:nota:validacion-de-fci-para-operar
+    categoria: nota
+    notas: >
+      La pregunta que motivó crear las notas: antes del cambio, esta regla
+      no estaba en ningún fragmento (falla de chunking). Respuesta: los FCI
+      vigentes con CodInterfazBloomberg asignado, y la condición de ACDI
+      según CodAgenteDepo.
+
+  - id: p19
+    pregunta: "como actualiso el domisilio de un comitente"
+    esperados:
+      - esco:put:domicilio-cuenta-comitente
+    categoria: typos
+    notas: >
+      Versión con errores de p01 (inventada a partir de tu pregunta, no del
+      PDF): sin tildes ni signos, "actualiso", "domisilio". En el ejercicio
+      de similitud los typos casi no movían el resultado (0.96 en e5). Si
+      p01 falla y esta también, el problema es la acción, no la ortografía.
+
+  - id: p20
+    pregunta: "¿Qué endpoint devuelve porcPartAccionaria?"
+    esperados:
+      - esco:post:get-condominios
+    categoria: tecnica
+    notas: >
+      Pregunta por un CAMPO, no por un endpoint. porcPartAccionaria aparece
+      en un solo fragmento (el Response de get-condominios). Es el caso donde
+      BM25 (palabra exacta) debería ganarle a la búsqueda semántica.

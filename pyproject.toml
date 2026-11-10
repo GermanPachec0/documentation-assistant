@@ -1,0 +1,28 @@
+[project]
+name = "api-docs-assistant"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=1.5.9",
+    "google-genai>=3.0.0",
+    "numpy>=2.5.4",
+    "pydantic>=2.14.3",
+    "pymupdf>=2.1",
+    "python-dotenv>=1.2.4",
+    "pyyaml>=6.0.3",
+    "rank-bm25>=0.2.2",
+    "sentence-transformers>=6.2.0",
+    "streamlit>=1.67.0",
+    "torch>=2.15.0",
+]
+
+# En Linux (el servidor de despliegue) PyTorch se instala en su versión CPU:
+# la versión por defecto trae librerías de GPU (varios GB) que no se usan.
+# En macOS no aplica (la marca sys_platform lo restringe a Linux).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

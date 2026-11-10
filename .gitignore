@@ -1,0 +1,27 @@
+# Secretos: la API key vive solo en tu máquina
+.env
+
+# Documentos originales (PDF de ESCO, specs): se descargan desde el link del README
+data/raw/*
+!data/raw/.gitkeep
+
+# Entorno virtual y caches de Python
+.venv/
+__pycache__/
+*.pyc
+
+# Experimentos personales
+scratch/
+
+# macOS
+.DS_Store
+
+# Base vectorial generada por la ingesta (se reconstruye con src/ingest.py)
+data/chroma/
+
+# Texto extraído del PDF de terceros: se regenera con src/preparar.py
+data/chunks/*.json
+!data/chunks/.gitkeep
+
+# Configuración personal del editor
+.vscode/

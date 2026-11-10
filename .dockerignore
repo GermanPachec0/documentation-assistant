@@ -1,0 +1,14 @@
+# Lo que NO entra en la imagen de Docker
+.git/
+.venv/
+.vscode/
+.env
+scratch/
+**/__pycache__/
+*.pyc
+.DS_Store
+
+# Los datos se generan dentro de la imagen con src/preparar.py
+data/raw/*.pdf
+data/chunks/*.json
+data/chroma/
