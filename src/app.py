@@ -84,7 +84,7 @@ EJEMPLOS = {
         "¿Cómo actualizo el domicilio de un comitente?",
         "¿Cómo creo una persona jurídica?",
         "¿Cómo anulo una orden?",
-        "¿Cómo puedo agregarle saldo a una cuenta comitente?",
+        "¿Cómo acredito dinero en la cuenta de un cliente?",
     ],
     "Nombres exactos": [
         "¿Qué endpoint devuelve porcPartAccionaria?",
