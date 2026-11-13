@@ -7,7 +7,9 @@ import re
 from collections.abc import Callable
 from functools import cache
 
-from busqueda import _coleccion, _modelo, buscar_semantica
+from rank_bm25 import BM25Okapi
+
+from busqueda import _coleccion, _modelo, buscar_semantica, fusionar_rrf, tokenizar
 from chunking import MAX_TOKENS_PADRE_AL_LLM, contar_tokens, encabezado_de
 from ingest import PREFIJO_PREGUNTA, aplicar_glosario, cargar_padres
 from llm import generar
@@ -67,6 +69,8 @@ Reglas:
    Debajo del bloque, en una línea: "Datos ficticios. Armado a partir de la
    documentación, no probado contra la API real."
    No incluyas URL base ni autenticación: no están en las fuentes.
+   Si la documentación no detalla los campos del endpoint (regla 3), NO
+   armes request de ejemplo: un cuerpo vacío o adivinado no le sirve a nadie.
 
 Formato:
 - Primero, la respuesta directa: qué endpoint y método usar, y por qué.
@@ -90,35 +94,71 @@ def _padres_por_id() -> dict[str, Fragmento]:
     return {p.id: p for p in aplicar_glosario(cargar_padres())}
 
 
-def _hijo_y_vecinos(padre: Fragmento, pregunta: str) -> Fragmento:
-    """Para un padre gigante: el hijo más parecido a la pregunta + el anterior y el siguiente.
+@cache
+def _hijos_de(padre_id: str) -> tuple[list[str], list[str], BM25Okapi]:
+    """Ids y textos de los hijos de un padre, en orden (#1, #2…), y su índice BM25."""
+    res = _coleccion().get(where={"$and": [{"padre_id": padre_id}, {"unidad": "hijo"}]}, include=["documents"])
+    pares = sorted(zip(res["ids"], res["documents"]), key=lambda par: int(par[0].split("#")[1]))
+    ids, textos = [i for i, _ in pares], [t for _, t in pares]
+    return ids, textos, BM25Okapi([tokenizar(t) for t in textos])
 
+
+def _mejor_hijo(padre_id: str, pregunta: str) -> int:
+    """El número del hijo más relevante, fusionando semántica y BM25 con RRF.
+
+    Solo con embeddings no alcanza: todos los hijos repiten el encabezado del
+    padre y la similitud entre ellos difiere en 0.02 (casi azar). BM25 aporta
+    la palabra exacta que los distingue ("jurídica" está en un solo hijo).
+    """
+    ids, _, bm25 = _hijos_de(padre_id)
+    vector = _modelo().encode([PREFIJO_PREGUNTA + pregunta], normalize_embeddings=True)
+    semantico = _coleccion().query(
+        query_embeddings=vector.tolist(),
+        n_results=len(ids),
+        where={"$and": [{"padre_id": padre_id}, {"unidad": "hijo"}]},
+        include=[],
+    )["ids"][0]
+    puntajes = bm25.get_scores(tokenizar(pregunta))
+    por_palabras = [ids[i] for i in sorted(range(len(ids)), key=lambda i: puntajes[i], reverse=True)]
+    mejor = fusionar_rrf([semantico, por_palabras], k=1)[0]
+    return int(mejor.split("#")[1])
+
+
+def _hijo_y_vecinos(padre: Fragmento, pregunta: str) -> Fragmento:
+    """Para un padre gigante: el PRINCIPIO del endpoint + el hijo más relevante y sus vecinos.
+
+    El hijo #1 va siempre: tiene la descripción y el comienzo del request,
+    que el LLM necesita para casi cualquier pregunta sobre cómo llamarlo.
     Los hijos repiten el encabezado del padre: va una sola vez, al principio.
     """
-    coleccion = _coleccion()
-    vector = _modelo().encode([PREFIJO_PREGUNTA + pregunta], normalize_embeddings=True)
-    mejor = coleccion.query(
-        query_embeddings=vector.tolist(),
-        n_results=1,
-        where={"$and": [{"padre_id": padre.id}, {"unidad": "hijo"}]},
-        include=[],
-    )["ids"][0][0]
-    n = int(mejor.split("#")[1])
-    ids = [f"{padre.id}#{i}" for i in (n - 1, n, n + 1)]
-    encontrados = coleccion.get(ids=ids, include=["documents"])  # los que no existen no vuelven
-    por_id = dict(zip(encontrados["ids"], encontrados["documents"]))
-    partes = [i for i in ids if i in por_id]
+    ids, textos, _ = _hijos_de(padre.id)
+    total = len(ids)
+    n = _mejor_hijo(padre.id, pregunta)
+    elegidos = sorted({1} | {i for i in (n - 1, n, n + 1) if 1 <= i <= total})
 
     n_encabezado = len(encabezado_de(padre, _modelo()).texto.splitlines())
-    lineas = por_id[partes[0]].splitlines()
-    for i in partes[1:]:
-        lineas += por_id[i].splitlines()[n_encabezado:]  # sin repetir el encabezado
+    lineas = textos[elegidos[0] - 1].splitlines()
+    anterior = elegidos[0]
+    for i in elegidos[1:]:
+        if i != anterior + 1:
+            lineas.append(f"[… se omiten las partes {anterior + 1}-{i - 1} …]" if i - anterior > 2
+                          else f"[… se omite la parte {anterior + 1} …]")
+        lineas += textos[i - 1].splitlines()[n_encabezado:]  # sin repetir el encabezado
+        anterior = i
 
-    hermanos = coleccion.get(where={"$and": [{"padre_id": padre.id}, {"unidad": "hijo"}]}, include=[])
-    total = len(hermanos["ids"])
-    desde, hasta = partes[0].split("#")[1], partes[-1].split("#")[1]
-    # El rango va en el id ("x#3-5de20") para que la etiqueta lo muestre.
-    return padre.model_copy(update={"texto": "\n".join(lineas), "id": f"{padre.id}#{desde}-{hasta}de{total}"})
+    # Las partes van en el id ("x#1,3-5de20") para que la etiqueta las muestre.
+    return padre.model_copy(update={"texto": "\n".join(lineas), "id": f"{padre.id}#{_rangos(elegidos)}de{total}"})
+
+
+def _rangos(numeros: list[int]) -> str:
+    """[1, 3, 4, 5] → "1,3-5"."""
+    grupos: list[list[int]] = []
+    for x in numeros:
+        if grupos and x == grupos[-1][-1] + 1:
+            grupos[-1].append(x)
+        else:
+            grupos.append([x])
+    return ",".join(str(g[0]) if len(g) == 1 else f"{g[0]}-{g[-1]}" for g in grupos)
 
 
 def armar_contexto(pregunta: str, k: int = 5, buscar: Buscador = buscar_semantica) -> list[Fragmento]:
@@ -126,7 +166,7 @@ def armar_contexto(pregunta: str, k: int = 5, buscar: Buscador = buscar_semantic
     los LLMs atienden más al principio del contexto que al medio).
 
     Decisión 3 (chunking.py): el padre completo si tiene ≤ MAX_TOKENS_PADRE_AL_LLM;
-    si no, el hijo más parecido a la pregunta y sus vecinos.
+    si no, el principio del endpoint + el hijo más relevante y sus vecinos.
     """
     padres = _padres_por_id()
     fragmentos = []
