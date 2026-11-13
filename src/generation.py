@@ -10,7 +10,7 @@ from functools import cache
 from rank_bm25 import BM25Okapi
 
 from busqueda import _coleccion, _modelo, buscar_semantica, fusionar_rrf, tokenizar
-from chunking import MAX_TOKENS_PADRE_AL_LLM, contar_tokens, encabezado_de
+from chunking import MAX_TOKENS_PADRE_AL_LLM, PRESUPUESTO_TOKENS_CONTEXTO, contar_tokens, encabezado_de
 from ingest import PREFIJO_PREGUNTA, aplicar_glosario, cargar_padres
 from llm import generar
 from models import Fragmento
@@ -63,7 +63,15 @@ Reglas:
    - SINTAXIS: JSON válido, con comillas dobles rectas, sin comas finales y
      sin comentarios adentro (un comentario rompe el JSON).
    - Si el PDF trae un ejemplo, usalo como base, pero con la sintaxis
-     corregida si estaba rota, y decí qué corregiste.
+     corregida si estaba rota, y decí qué corregiste. Reemplazá los valores
+     de relleno ("string", 0) por valores ficticios verosímiles, y NUNCA
+     copies emails, nombres, CUIT, CBU ni documentos del ejemplo del PDF:
+     pueden ser datos reales. Inventá otros.
+   - Si el request es muy grande, incluí los obligatorios y los bloques
+     del caso elegido, y aclará que hay más campos opcionales en la fuente.
+   - COHERENCIA: el ejemplo tiene que ser un caso posible. Si un campo
+     define el tipo de caso (por ejemplo persona física o jurídica), incluí
+     solo los bloques que corresponden a ese caso.
    - Si el endpoint es GET sin body, mostrá la ruta con los parámetros en la
      query string en un bloque ```http (NO ```json: una ruta no es JSON).
    Debajo del bloque, en una línea: "Datos ficticios. Armado a partir de la
@@ -72,7 +80,21 @@ Reglas:
    Si la documentación no detalla los campos del endpoint (regla 3), NO
    armes request de ejemplo: un cuerpo vacío o adivinado no le sirve a nadie.
 
+8. Si la pregunta pide un FLUJO o PROCESO completo (por ejemplo "dar de alta
+   una cuenta con todo lo necesario"), armalo como pasos numerados, en orden:
+   - Paso 1, consultas previas: si la fuente trae un bloque "[Consultas
+     previas]", listá TODAS esas consultas (consulta → campos que completa),
+     agrupadas por tema (cuenta, titulares, domicilio, cuenta bancaria,
+     datos jurídicos…). Son las que dan los códigos válidos. Si una está
+     marcada como no documentada, decilo.
+   - Paso 2, el endpoint principal, con sus obligatorios y el request de
+     ejemplo (regla 7).
+   - Paso 3, si las fuentes lo muestran, los endpoints complementarios
+     (por ejemplo, agregar una cuenta bancaria o un domicilio después).
+   Usá solo lo que está en las fuentes: no agregues pasos que no figuren.
+
 Formato:
+- Si es un flujo, seguí la regla 8. Si no:
 - Primero, la respuesta directa: qué endpoint y método usar, y por qué.
 - Después, los parámetros obligatorios, con sus citas.
 - Al final, el request de ejemplo, así:
@@ -161,22 +183,95 @@ def _rangos(numeros: list[int]) -> str:
     return ",".join(str(g[0]) if len(g) == 1 else f"{g[0]}-{g[-1]}" for g in grupos)
 
 
+# "Los valores posibles se pueden obtener con la consulta get-actividades":
+# así marca el PDF que un campo se completa con el código de un catálogo.
+_PROPIEDAD = re.compile(r"public\s+[\w<>?\[\],]+\s+(\w+)\s*\{")
+_CONSULTA_GET = re.compile(r"\b(get-[A-Za-z0-9-]+)")
+
+
+def _clave(endpoint: str) -> str:
+    # get-actividadesUIF y get-actividades-uif son el mismo: sin guiones ni mayúsculas.
+    return endpoint.lower().replace("-", "")
+
+
+def consultas_previas(fragmento: Fragmento) -> list[tuple[str, str, bool]]:
+    """(campo, consulta get-…, ¿está documentada en el PDF?), en el orden del texto.
+
+    El código extrae, el LLM redacta: en un endpoint de 7.000 tokens el modelo
+    no encuentra estas líneas sueltas (probado: decía "no hay consultas
+    previas"). Sacadas por código y puestas al principio, no se le escapan.
+    """
+    documentados = {_clave(p.endpoint): p.endpoint for p in _padres_por_id().values()}
+    campo, vistos, salida = None, set(), []
+    for linea in fragmento.texto.splitlines():
+        if m := _PROPIEDAD.search(linea):
+            campo = m.group(1)
+            continue
+        for consulta in _CONSULTA_GET.findall(linea):
+            consulta = consulta.rstrip("-.")
+            clave = _clave(consulta)
+            if not campo or clave == _clave(fragmento.endpoint) or (campo, clave) in vistos:
+                continue
+            vistos.add((campo, clave))
+            salida.append((campo, documentados.get(clave, consulta), clave in documentados))
+    return salida
+
+
+def _con_consultas_previas(fragmento: Fragmento, padre: Fragmento) -> Fragmento:
+    """Agrega, después del encabezado, la lista de campos que salen de un catálogo."""
+    consultas = consultas_previas(padre)
+    if not consultas:
+        return fragmento
+    lineas = ["[Consultas previas: campos cuyo valor sale de otra consulta, en el orden del documento]"]
+    for campo, consulta, documentada in consultas:
+        lineas.append(f"- {campo} → {consulta}" + ("" if documentada else " (nombrada, pero no documentada en este PDF)"))
+    lineas.append("[Fin consultas previas]")
+    texto = fragmento.texto.splitlines()
+    n = len(encabezado_de(fragmento, _modelo()).texto.splitlines())
+    return fragmento.model_copy(update={"texto": "\n".join(texto[:n] + lineas + texto[n:])})
+
+
 def armar_contexto(pregunta: str, k: int = 5, buscar: Buscador = buscar_semantica) -> list[Fragmento]:
     """Los k padres que trae la búsqueda, en orden (el más relevante primero:
     los LLMs atienden más al principio del contexto que al medio).
 
-    Decisión 3 (chunking.py): el padre completo si tiene ≤ MAX_TOKENS_PADRE_AL_LLM;
-    si no, el principio del endpoint + el hijo más relevante y sus vecinos.
+    Decisión 3 (chunking.py): el padre completo si es chico o si todavía entra
+    en el presupuesto del contexto; si no, el principio + el hijo más relevante
+    y sus vecinos. Las consultas previas se sacan del padre COMPLETO, aunque al
+    LLM le llegue un recorte.
     """
     padres = _padres_por_id()
     fragmentos = []
+    restante = PRESUPUESTO_TOKENS_CONTEXTO
     for padre_id in buscar(pregunta, k):
         padre = padres[padre_id]
-        if contar_tokens(_modelo(), padre.texto) > MAX_TOKENS_PADRE_AL_LLM:
-            fragmentos.append(_hijo_y_vecinos(padre, pregunta))
+        tokens = contar_tokens(_modelo(), padre.texto)
+        if tokens <= MAX_TOKENS_PADRE_AL_LLM or tokens <= restante:
+            fragmento = padre
         else:
-            fragmentos.append(padre)
+            fragmento = _hijo_y_vecinos(padre, pregunta)
+            tokens = contar_tokens(_modelo(), fragmento.texto)
+        restante -= tokens
+        fragmentos.append(_limpiar_ejemplos(_con_consultas_previas(fragmento, padre)))
     return fragmentos
+
+
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def _limpiar_ejemplos(fragmento: Fragmento) -> Fragmento:
+    """Los ejemplos del PDF traen emails que parecen de personas reales
+    y valores de relleno ("string").
+
+    El prompt le pide al LLM que no los copie, pero Flash-Lite a veces lo hace
+    igual. Lo que no tiene que salir nunca se resuelve por código: el email
+    no llega al modelo, así que no lo puede repetir.
+    """
+    texto = _EMAIL.sub("usuario@ejemplo.com", fragmento.texto)
+    # "string" es el relleno por defecto de Swagger: el modelo lo copiaba
+    # tal cual. Marcado así, lo reconoce como un hueco a completar.
+    texto = texto.replace('"string"', '"<INVENTAR VALOR>"')
+    return fragmento if texto == fragmento.texto else fragmento.model_copy(update={"texto": texto})
 
 
 def _etiqueta(f: Fragmento) -> str:
@@ -239,12 +334,30 @@ def lista_fuentes(fragmentos: list[Fragmento], citadas: list[int]) -> str:
     return "Fuentes:\n" + "\n".join(f"[{n}] {_etiqueta(fragmentos[n - 1])}" for n in sorted(citadas))
 
 
+_PALABRAS_INGLES = {"how", "what", "which", "do", "does", "is", "are", "the", "can", "i", "to", "of", "a", "an", "where", "when", "get", "create", "update", "delete"}
+
+
+def _idioma(pregunta: str) -> str:
+    """Inglés o español, por palabras frecuentes. Simple a propósito.
+
+    La regla "respondé en el idioma de la pregunta" del sistema no alcanzó:
+    con miles de tokens de fuentes en español, el modelo respondía en español.
+    Decírselo explícito, al final, sí funciona.
+    """
+    palabras = re.findall(r"[a-záéíóúñ]+", pregunta.lower())
+    en_ingles = sum(p in _PALABRAS_INGLES for p in palabras)
+    return "inglés" if palabras and en_ingles / len(palabras) >= 0.3 else "español"
+
+
 def responder(pregunta: str, k: int = 5, buscar: Buscador = buscar_semantica) -> dict:
     fragmentos = armar_contexto(pregunta, k, buscar)
     prompt = (
         "FUENTES:\n\n"
         + formatear_contexto(fragmentos)
         + f"\n\nPregunta del usuario: {pregunta}"
+        # Al final, cerca de la pregunta: con 10.000+ tokens de fuentes en el
+        # medio, el modelo se olvidaba de la regla de idioma del sistema.
+        + f"\n\n(Respondé en {_idioma(pregunta)}.)"
     )
     r = generar(prompt, sistema=SISTEMA)
     cuerpo, citadas = formatear_citas(r["texto"], fragmentos)

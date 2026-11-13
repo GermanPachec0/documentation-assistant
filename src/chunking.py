@@ -8,11 +8,14 @@ id.split("#")[0], sin agregar campos al modelo.
 
 Decisión 3 — qué se le manda al LLM cuando la búsqueda trae un hijo:
 - Padre de hasta MAX_TOKENS_PADRE_AL_LLM tokens → el PADRE completo.
-- Padre más grande → el hijo encontrado + sus vecinos (#n-1 y #n+1).
+- Padre más grande → el principio (#1) + el hijo más relevante y sus vecinos.
 Por qué: el padre completo responde preguntas que cruzan partes ("¿qué es
-obligatorio?") y la mayoría de los endpoints son chicos; pero 5 padres
-gigantes serían +30.000 tokens por pregunta en el plan gratuito, así que ahí
-se acota a ~1.500 tokens (3 hijos). Se mide en el Paso 6.
+obligatorio?", "¿cuál es el flujo completo?"). Empezó en 1.500 tokens por
+precaución (costo, lost-in-the-middle), pero cortaba insert-cuenta-comitente
+(~7.400 tokens) y el LLM no veía los campos ni las consultas previas que pide.
+Ahora: hasta 3.000 tokens, entero siempre; más grande, entero si todavía
+entra en el presupuesto de 9.000 para todo el contexto (en orden de
+relevancia); si no, recortado.
 """
 
 import re
@@ -22,7 +25,13 @@ from models import Fragmento
 # 500 y no 512: deja lugar para los tokens especiales del modelo.
 MAX_TOKENS = 500
 # Decisión 3 (ver docstring): hasta este tamaño se manda el padre entero al LLM.
-MAX_TOKENS_PADRE_AL_LLM = 1500
+# Además hay un PRESUPUESTO para todo el contexto: un padre más grande que
+# MAX_TOKENS_PADRE_AL_LLM igual va entero si todavía entra en el presupuesto
+# (así insert-cuenta-comitente, ~7.400, llega completo cuando hace falta).
+# Mandar todo entero sin tope llevaba preguntas simples a 14.000+ tokens y
+# Flash-Lite empeoraba: más ruido, no más información útil.
+PRESUPUESTO_TOKENS_CONTEXTO = 9000
+MAX_TOKENS_PADRE_AL_LLM = 3000
 PREFIJO_DOC = "passage: "  # e5 embebe los documentos con este prefijo
 
 # Decisión 2: el encabezado es lo que identifica al endpoint (método +

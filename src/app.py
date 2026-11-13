@@ -81,6 +81,7 @@ def hay_cupo_global() -> bool:
 # Preguntas listas para probar, agrupadas por lo que ponen a prueba.
 EJEMPLOS = {
     "Encontrar el endpoint correcto": [
+        "¿Cómo doy de alta una cuenta comitente con su flujo de datos completo?",
         "¿Cómo actualizo el domicilio de un comitente?",
         "¿Cómo creo una persona jurídica?",
         "¿Cómo anulo una orden?",
